@@ -1,14 +1,122 @@
 # BUYFIRE
 
-**Attack your store with AI buyers before real AI buyers do.**
+## The AI Commerce Agent That Knows When It Doesn't Know.
 
-BUYFIRE launches synthetic AI buyers against a merchant catalog and walks:
+BUYFIRE is a security-first AI commerce agent that can reason about a purchase without turning missing information into fabricated merchant facts.
 
-`DISCOVER → UNDERSTAND → COMPARE → VERIFY → CART → CHECKOUT`
+AI can decide what it wants to buy. BUYFIRE decides whether it has enough verified evidence to safely proceed.
 
-It finds where autonomous purchase fails, generates a machine-readable commerce repair, reruns the **same** mission, and demonstrates a safe simulated checkout.
+### The core loop
 
-> **Central question: Can an AI actually buy from your store?**
+UNKNOWN
+↓
+GENERATED REPAIR
+↓
+MERCHANT VERIFICATION
+↓
+VERIFIED
+↓
+DETERMINISTIC POLICY
+↓
+CHECKOUT
+
+### The problem
+
+Autonomous commerce agents can encounter incomplete or untrusted merchant data.
+
+The dangerous failure is not simply an AI making a bad recommendation.
+
+It is an AI silently filling in missing commerce facts and then using those invented facts to justify a purchase.
+
+BUYFIRE is designed around the opposite principle:
+
+> If the merchant did not provide the fact, BUYFIRE does not invent it.
+
+### What makes BUYFIRE different
+
+BUYFIRE separates AI reasoning from purchase authorization.
+
+When critical information is missing:
+
+1. BUYFIRE detects the missing fact.
+2. The repair engine generates a machine-readable repair structure.
+3. The repair remains explicitly UNVERIFIED.
+4. Merchant verification is required.
+5. Only VERIFIED information can unblock the purchase.
+6. A deterministic policy engine independently validates the purchase before checkout.
+
+Generated information is never silently converted into merchant truth.
+
+### The live demo
+
+Buyer mission:
+
+"I need the best laptop for CAD work under ₹80,000."
+
+The merchant catalog is missing a shipping promise.
+
+BUYFIRE:
+
+PURCHASE BLOCKED
+
+Reason:
+SHIPPING PROMISE UNKNOWN
+
+Then:
+
+GENERATED REPAIR
+NOT VERIFIED
+
+Then:
+
+DEMO / SYNTHETIC MERCHANT VERIFICATION
+
+Then:
+
+VERIFIED
+
+Then the SAME mission is rerun:
+
+COMPLETE — ₹74,990
+
+The payment layer is explicitly simulated:
+
+SIMULATION — NO REAL MONEY MOVED
+
+### Security boundary
+
+The model/content layer never receives payment authority.
+
+Purchase authorization is enforced separately through deterministic checks for:
+
+- amount
+- currency
+- merchant
+- product
+- idempotency
+- approved purchase plan
+
+BUYFIRE also demonstrates:
+
+- prompt-injection blocking
+- payment-plan tamper resistance
+- no blind retry after payment failure
+- audit logging
+- secret stripping
+
+### Why this matters
+
+The central question is not:
+
+"Can an AI click Buy?"
+
+It is:
+
+"Can an autonomous commerce system know the difference between what it knows, what it generated, and what the merchant actually confirmed?"
+
+BUYFIRE makes that boundary explicit.
+
+---
 
 ## Quick Start (verified)
 
