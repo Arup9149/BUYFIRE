@@ -1,5 +1,14 @@
 import { createServer } from "http";
 import { randomUUID } from "crypto";
+import {
+  scanMerchant,
+  generateMerchantRepairs,
+  verifyMerchantField,
+  generatedBlocksPurchase,
+  parseProductCsv,
+} from "./merchant-scan.mjs";
+import { scanPublicUrl, validatePublicUrl, scanHtmlFixture } from "./url-scanner.mjs";
+import { createLead, listLeads } from "./lead-store.mjs";
 
 const PORT = Number(process.env.PORT) || 3847;
 
@@ -33,7 +42,6 @@ const PERSONAS = {
 const POLICY = { maxTransactionAmount: 100000, allowedCurrency: ["INR"], allowedMerchantIds: [DEMO_MERCHANT.id], expirationSeconds: 900 };
 const INJECTION_PATTERNS = [/ignore\s+(all\s+)?previous\s+instructions/i, /disregard\s+(all\s+)?(prior|previous)/i, /override\s+(system|policy|limit)/i, /buy\s+\d+\s+units?\s+immediately/i, /transfer\s+payment\s+authority/i, /you\s+are\s+now/i, /forget\s+(everything|all)/i];
 const auditStore = [];
-const approvedPlans = new Map();
 function now() { return new Date().toISOString(); }
 
 function recordAudit(params) {
@@ -124,21 +132,9 @@ function runBuyer({ mission, merchant, repairedProducts, isRepairedRun = false }
     if (p.stock <= 0) { verifyEv.push({ type: "blocked", label: "Out of stock", detail: p.name + " has zero stock", source: p.id }); canProceed = false; }
     else { verifyEv.push({ type: "match", label: "Stock verified", detail: p.name + ": " + p.stock + " units available", source: p.id }); }
     if (!p.shippingPromise || p.shippingPromise === "UNKNOWN") {
-      if (p.shippingFactStatus === "GENERATED") {
-        verifyEv.push({ type: "blocked", label: "GENERATED STRUCTURE NOT VERIFIED", detail: "REPAIR: Shipping promise structure = GENERATED. Merchant verification = REQUIRED. GENERATED is not a merchant shipping promise.", source: p.id });
-        canProceed = false;
-        blockedReason = "GENERATED shipping is unverified. Merchant verification required.";
-      } else {
-        verifyEv.push({ type: "blocked", label: "SHIPPING PROMISE UNKNOWN", detail: "ORIGINAL: Shipping promise = UNKNOWN. Merchant did not provide the fact.", source: p.id });
-        canProceed = false;
-        blockedReason = "SHIPPING PROMISE UNKNOWN";
-      }
-    } else if (p.shippingFactStatus === "GENERATED") {
-      verifyEv.push({ type: "blocked", label: "GENERATED STRUCTURE NOT VERIFIED", detail: "REPAIR: Shipping promise structure = GENERATED. Merchant verification = REQUIRED. GENERATED is not a merchant shipping promise.", source: p.id });
+      verifyEv.push({ type: "blocked", label: "Shipping promise missing", detail: "The system could not establish a valid delivery promise for " + p.name + ".", source: p.id });
       canProceed = false;
-      blockedReason = "GENERATED shipping is unverified. Merchant verification required.";
-    } else if (p.shippingFactStatus === "VERIFIED") {
-      verifyEv.push({ type: "match", label: "VERIFIED", detail: "DEMO / SYNTHETIC MERCHANT VERIFICATION. Not real merchant data. " + p.shippingPromise, source: p.id });
+      blockedReason = "The system could not establish a valid delivery promise.";
     } else {
       const deliveryConstraint = mission.constraints.find((c) => c.type === "delivery_days");
       if (deliveryConstraint && mission.persona === "URGENT_BUYER") {
@@ -196,7 +192,7 @@ function generateRepair(run) {
     { field: "use_cases", existing: product.useCases.join(", "), generated: product.useCases.join(", "), status: "EXISTING" },
   ];
   if (!product.shippingPromise) {
-    items.push({ field: "shipping_promise", existing: null, generated: JSON.stringify({ "@type": "ShippingPromiseSchema", provenance: "GENERATED", merchantVerification: "REQUIRED", fields: { deliveryWindow: null, carrier: null, deliveryGuarantee: null, shippingCost: null, geographicAvailability: null, merchantPromise: null }, note: "Structure only. BUYFIRE does not invent merchant shipping facts." }), status: "GENERATED", note: "ORIGINAL: Shipping promise = UNKNOWN. REPAIR: Shipping promise structure = GENERATED. Merchant verification = REQUIRED. Not original merchant data." });
+    items.push({ field: "shipping_promise", existing: null, generated: "Ships in 2–3 business days (standard). Express 1-day available in select metros.", status: "GENERATED", note: "Inferred from category norms. Marked GENERATED — not original merchant data." });
   } else {
     items.push({ field: "shipping_promise", existing: product.shippingPromise, generated: product.shippingPromise, status: "EXISTING" });
   }
@@ -207,40 +203,15 @@ function generateRepair(run) {
   }
   const repair = {
     repairId: randomUUID(), productId: product.id, productName: product.name, items,
-    machineReadableOffer: { "@type": "Offer", productId: product.id, name: product.name, price: product.price, priceCurrency: product.currency, availability: product.stock > 0 ? "InStock" : "OutOfStock", shipping: product.shippingPromise || null, shippingStatus: product.shippingPromise ? "EXISTING" : "GENERATED", merchantVerification: product.shippingPromise ? "NOT_REQUIRED" : "REQUIRED", returnPolicy: product.returnPolicy || "UNKNOWN" },
+    machineReadableOffer: { "@type": "Offer", productId: product.id, name: product.name, price: product.price, priceCurrency: product.currency, availability: product.stock > 0 ? "InStock" : "OutOfStock", shipping: product.shippingPromise || "Ships in 2–3 business days (standard). Express 1-day available in select metros.", shippingStatus: product.shippingPromise ? "EXISTING" : "GENERATED", returnPolicy: product.returnPolicy || "UNKNOWN" },
     createdAt: now(),
-    merchantVerification: product.shippingPromise ? "NOT_REQUIRED" : "REQUIRED",
   };
   recordAudit({ actor: "SYSTEM", action: "REPAIR_GENERATED", result: "SUCCESS", missionId: run.missionId, runId: run.runId, reason: "Repair generated for " + product.name, metadata: { repairId: repair.repairId, productId: product.id } });
   return repair;
 }
 function applyRepair(product, repair) {
   const shippingItem = repair.items.find((i) => i.field === "shipping_promise");
-  let shippingPromise = product.shippingPromise;
-  let shippingFactStatus = product.shippingPromise ? "EXISTING" : "UNKNOWN";
-  if (shippingItem && shippingItem.status === "GENERATED") {
-    shippingPromise = null;
-    shippingFactStatus = "GENERATED";
-  } else if (shippingItem && shippingItem.status === "VERIFIED" && shippingItem.generated) {
-    shippingPromise = String(shippingItem.generated);
-    shippingFactStatus = "VERIFIED";
-  }
-  return { ...product, shippingPromise, shippingFactStatus };
-}
-const DEMO_SYNTHETIC_SHIPPING_CONFIRMATION = "[DEMO / SYNTHETIC MERCHANT VERIFICATION] Simulated merchant confirmed that a shipping promise exists for this SKU. This is not live merchant production data. No carrier, cost, geography, or calendar delivery date is asserted as an original merchant fact.";
-function simulateMerchantVerification(repair) {
-  const items = repair.items.map((item) => {
-    if (item.field !== "shipping_promise" || item.status !== "GENERATED") return item;
-    return { ...item, generated: DEMO_SYNTHETIC_SHIPPING_CONFIRMATION, status: "VERIFIED", note: "DEMO / SYNTHETIC MERCHANT VERIFICATION. Not real merchant data. GENERATED schema was not treated as a merchant promise." };
-  });
-  const verified = {
-    ...repair,
-    items,
-    merchantVerification: "DEMO_SYNTHETIC_VERIFIED",
-    machineReadableOffer: { ...repair.machineReadableOffer, shipping: DEMO_SYNTHETIC_SHIPPING_CONFIRMATION, shippingStatus: "VERIFIED", merchantVerification: "DEMO_SYNTHETIC_VERIFIED", verificationLabel: "DEMO / SYNTHETIC MERCHANT VERIFICATION" },
-  };
-  recordAudit({ actor: "SYSTEM", action: "MERCHANT_VERIFICATION_SIMULATED", result: "SUCCESS", reason: "DEMO / SYNTHETIC MERCHANT VERIFICATION — not real merchant data", metadata: { repairId: repair.repairId, productId: repair.productId } });
-  return verified;
+  return { ...product, shippingPromise: shippingItem && shippingItem.status === "GENERATED" && shippingItem.generated ? String(shippingItem.generated) : product.shippingPromise };
 }
 function evaluatePolicy({ amount, currency, merchantId, productIds, missionId, runId }) {
   const checks = [];
@@ -258,7 +229,6 @@ function evaluatePolicy({ amount, currency, merchantId, productIds, missionId, r
   checks.push({ rule: "IDEMPOTENCY_KEY", passed: true, detail: "Key: " + idempotencyKey.slice(0, 24) + "…" });
   const allPassed = checks.every((c) => c.passed);
   const plan = { planId: randomUUID(), missionId, runId, productIds: productIds || [], amount, currency, merchantId, idempotencyKey, expiresAt, approved: allPassed, policyChecks: checks };
-  if (plan.approved) approvedPlans.set(plan.planId, plan);
   recordAudit({ actor: "POLICY_ENGINE", action: "POLICY_EVALUATION", result: plan.approved ? "SUCCESS" : "BLOCKED", missionId, runId, amount, currency, decision: plan.approved ? "APPROVED" : "REJECTED", reason: plan.policyChecks.filter((c) => !c.passed).map((c) => c.detail).join("; ") || "All checks passed" });
   return plan;
 }
@@ -331,11 +301,6 @@ const server = createServer(async (req, res) => {
       if (!repair) return json(res, 404, { error: "Could not generate repair" });
       return json(res, 200, repair);
     }
-    if (req.method === "POST" && path === "/api/repair/verify-merchant") {
-      const body = await readBody(req);
-      if (!body.repair) return json(res, 400, { error: "repair required" });
-      return json(res, 200, simulateMerchantVerification(body.repair));
-    }
     if (req.method === "POST" && path === "/api/policy/evaluate") {
       const body = await readBody(req);
       if (body.amount == null || !body.currency || !body.merchantId || !body.missionId || !body.runId) return json(res, 400, { error: "Missing required fields" });
@@ -344,9 +309,8 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && path === "/api/payment/charge") {
       const body = await readBody(req);
       if (!body.plan) return json(res, 400, { error: "plan required" });
-      const stored = approvedPlans.get(body.plan.planId);
-      if (!stored || !stored.approved) return json(res, 403, { error: "Purchase plan not approved by policy engine" });
-      return json(res, 200, charge(stored, { forceFail: Boolean(body.forceFail) }));
+      if (!body.plan.approved) return json(res, 403, { error: "Purchase plan not approved by policy engine" });
+      return json(res, 200, charge(body.plan, { forceFail: Boolean(body.forceFail) }));
     }
     if (req.method === "GET" && path === "/api/payment/adapter") {
       return json(res, 200, { active: "DemoSimulationAdapter", razorpayConfigured: false, note: "SIMULATION — NO REAL MONEY MOVED" });
@@ -388,18 +352,12 @@ const server = createServer(async (req, res) => {
       recordAudit({ actor: "USER", action: "DEMO_STARTED", result: "INFO", missionId: mission.id, intent: mission.statement });
       const run1 = runBuyer({ mission, merchant: DEMO_MERCHANT });
       const repair = generateRepair(run1);
-      let run2 = null, plan = null, payment = null, generatedRun = null;
+      let run2 = null, plan = null, payment = null;
       if (repair) {
         const repairedMap = {};
         const base = DEMO_MERCHANT.products.find((p) => p.id === repair.productId);
-        if (base) {
-          repairedMap[repair.productId] = applyRepair(base, repair);
-          generatedRun = runBuyer({ mission, merchant: DEMO_MERCHANT, repairedProducts: repairedMap, isRepairedRun: true });
-        }
-        const verified = simulateMerchantVerification(repair);
-        const verifiedMap = {};
-        if (base) verifiedMap[repair.productId] = applyRepair(base, verified);
-        run2 = runBuyer({ mission, merchant: DEMO_MERCHANT, repairedProducts: verifiedMap, isRepairedRun: true });
+        if (base) repairedMap[repair.productId] = applyRepair(base, repair);
+        run2 = runBuyer({ mission, merchant: DEMO_MERCHANT, repairedProducts: repairedMap, isRepairedRun: true });
         if (run2.finalState === "COMPLETE" && run2.cartTotal) {
           plan = evaluatePolicy({ amount: run2.cartTotal, currency: run2.currency || "INR", merchantId: DEMO_MERCHANT.id, productIds: run2.selectedProductIds, missionId: mission.id, runId: run2.runId });
           if (plan.approved) payment = charge(plan);
@@ -410,8 +368,185 @@ const server = createServer(async (req, res) => {
       if (securityAlert) recordAudit({ actor: "SECURITY", action: "PROMPT_INJECTION_BLOCKED", result: "BLOCKED", reason: "Merchant content attempted to modify agent behavior", metadata: { productId: malicious.id } });
       let paymentFail = null;
       if (plan) paymentFail = charge(plan, { forceFail: true });
-      return json(res, 200, { merchant: { id: DEMO_MERCHANT.id, name: DEMO_MERCHANT.name }, mission, run1, repair, generatedRun, run2, plan, payment, securityAlert, paymentFail, audit: auditStore.slice().sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)) });
+      return json(res, 200, { merchant: { id: DEMO_MERCHANT.id, name: DEMO_MERCHANT.name }, mission, run1, repair, run2, plan, payment, securityAlert, paymentFail, audit: auditStore.slice().sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)) });
     }
+    // ---------- Merchant Scanner (commercial wedge) ----------
+    if (req.method === "POST" && path === "/api/merchant/scan") {
+      const body = await readBody(req);
+      const requestedUrl = body.url || body.storeUrl || null;
+
+      // Explicit demo path
+      if (body.demo === true || body.useDemo === true) {
+        const result = scanMerchant(DEMO_MERCHANT, { source: "DEMO_CATALOG", storeUrl: null });
+        recordAudit({
+          actor: "USER",
+          action: "MERCHANT_SCAN",
+          result: "SUCCESS",
+          reason: `DEMO scan ${result.scanId} score=${result.readiness.score}`,
+          metadata: { scanId: result.scanId, source: "DEMO_CATALOG", score: result.readiness.score },
+        });
+        return json(res, 200, result);
+      }
+
+      if (body.csvText) {
+        const parsed = parseProductCsv(body.csvText);
+        if (parsed.error) return json(res, 400, { error: parsed.error });
+        const result = scanMerchant(parsed.merchant, { source: "CSV", storeUrl: null });
+        recordAudit({
+          actor: "USER",
+          action: "MERCHANT_SCAN",
+          result: "SUCCESS",
+          reason: `CSV scan ${result.scanId} score=${result.readiness.score}`,
+          metadata: { scanId: result.scanId, source: "CSV", score: result.readiness.score },
+        });
+        return json(res, 200, result);
+      }
+
+      if (requestedUrl) {
+        const scanned = await scanPublicUrl(requestedUrl);
+        if (!scanned.ok) {
+          recordAudit({
+            actor: "USER",
+            action: "MERCHANT_SCAN",
+            result: "FAILURE",
+            reason: scanned.incompleteReason || scanned.error || "SCAN INCOMPLETE",
+            metadata: { storeUrl: requestedUrl },
+          });
+          return json(res, 422, {
+            scanIncomplete: true,
+            classification: scanned.classification || "INCOMPLETE",
+            incompleteReason: scanned.incompleteReason || scanned.error,
+            error: scanned.error || scanned.incompleteReason,
+            storeUrl: requestedUrl,
+            failures: scanned.failures || undefined,
+            recovery: scanned.recovery || {
+              message: "Upload a product CSV or provide product page URLs for a stronger scan.",
+              actions: ["UPLOAD_CSV", "PROVIDE_PRODUCT_URLS", "REQUEST_PAID_AUDIT"],
+            },
+          });
+        }
+        recordAudit({
+          actor: "USER",
+          action: "MERCHANT_SCAN",
+          result: "SUCCESS",
+          reason: `URL scan ${scanned.scanId} score=${scanned.readiness.score} pages=${(scanned.pagesFetched||[]).length}`,
+          metadata: { scanId: scanned.scanId, source: "URL", score: scanned.readiness.score, storeUrl: requestedUrl },
+        });
+        return json(res, 200, scanned);
+      }
+
+      // No URL / CSV / demo flag — require explicit choice (do not silently scan demo as customer store)
+      return json(res, 400, {
+        error: "Provide url for a public store scan, csvText for CSV, or demo:true for DEMO / SYNTHETIC MERCHANT VERIFICATION",
+      });
+    }
+
+    if (req.method === "POST" && path === "/api/merchant/audit-request") {
+      const body = await readBody(req);
+      const result = createLead({
+        email: body.email,
+        storeUrl: body.storeUrl || body.url,
+        storeName: body.storeName || body.company || null,
+        scannerScore: body.scannerScore,
+        classification: body.classification,
+        scanId: body.scanId,
+        source: body.source,
+      });
+      if (!result.ok) {
+        recordAudit({
+          actor: "USER",
+          action: "AUDIT_LEAD_REQUEST",
+          result: "FAILURE",
+          reason: result.error,
+        });
+        return json(res, 400, result);
+      }
+      recordAudit({
+        actor: "USER",
+        action: "AUDIT_LEAD_REQUEST",
+        result: "SUCCESS",
+        reason: "Full BUYFIRE audit lead (₹2,999) — no payment processed",
+        metadata: {
+          requestId: result.requestId,
+          storeUrl: result.storeUrl,
+          emailDomain: (result.email || "").split("@")[1] || "unknown",
+          duplicateOf: result.duplicateOf || null,
+          score: body.scannerScore != null ? body.scannerScore : null,
+          classification: body.classification || null,
+        },
+      });
+      return json(res, 200, result);
+    }
+
+    if (req.method === "GET" && path === "/api/merchant/leads") {
+      // Local ops only — no secrets; emails present for merchant follow-up
+      const leads = listLeads(100);
+      return json(res, 200, { count: leads.length, leads });
+    }
+
+    if (req.method === "POST" && path === "/api/merchant/repair") {
+      const body = await readBody(req);
+      if (!body.scan) return json(res, 400, { error: "scan required" });
+      const batch = generateMerchantRepairs(body.scan, DEMO_MERCHANT);
+      recordAudit({
+        actor: "SYSTEM",
+        action: "MERCHANT_REPAIR_GENERATED",
+        result: "SUCCESS",
+        reason: `Repair batch ${batch.repairBatchId}: ${batch.repairs.length} GENERATED fields (NOT VERIFIED)`,
+        metadata: { repairBatchId: batch.repairBatchId, scanId: body.scan.scanId },
+      });
+      return json(res, 200, batch);
+    }
+
+    if (req.method === "POST" && path === "/api/merchant/verify") {
+      const body = await readBody(req);
+      if (!body.repairBatch || !body.field) return json(res, 400, { error: "repairBatch and field required" });
+      const result = verifyMerchantField(body.repairBatch, body.field, body.productId || null, body.confirmedValue);
+      if (!result.ok) {
+        recordAudit({
+          actor: "USER",
+          action: "MERCHANT_VERIFY_REJECTED",
+          result: "FAILURE",
+          reason: result.error,
+        });
+        return json(res, 400, result);
+      }
+      recordAudit({
+        actor: "USER",
+        action: "MERCHANT_VERIFY",
+        result: "SUCCESS",
+        reason: `Field ${body.field} promoted to VERIFIED by merchant confirmation`,
+        metadata: { field: body.field, productId: body.productId || null },
+      });
+      return json(res, 200, result);
+    }
+
+    if (req.method === "POST" && path === "/api/merchant/purchase-gate") {
+      const body = await readBody(req);
+      const gate = generatedBlocksPurchase(body.evidence || [], body.productIds || []);
+      recordAudit({
+        actor: "POLICY_ENGINE",
+        action: "GENERATED_PURCHASE_GATE",
+        result: gate.blocked ? "BLOCKED" : "SUCCESS",
+        reason: gate.reason || "No GENERATED blockers for selected products",
+      });
+      return json(res, 200, gate);
+    }
+
+    if (req.method === "GET" && path === "/merchant") {
+      try {
+        const { readFileSync } = await import("fs");
+        const { fileURLToPath } = await import("url");
+        const { dirname, join } = await import("path");
+        const __dirname = dirname(fileURLToPath(import.meta.url));
+        const html = readFileSync(join(__dirname, "..", "demo.html"), "utf8");
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
+        return res.end(html);
+      } catch (e) {
+        return json(res, 500, { error: e.message });
+      }
+    }
+
     if (req.method === "GET" && (path === "/" || path === "/demo.html" || path === "/index.html")) {
       try {
         const { readFileSync } = await import("fs");

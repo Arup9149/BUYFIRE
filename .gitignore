@@ -1,9 +1,9 @@
+# BUYFIRE
+
+backend/data/
 node_modules/
+**/node_modules/
 .env
 .env.*
-*.key
-*.pem
-*.secret
-secrets/
-coverage/
 *.log
+.DS_Store

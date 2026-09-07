@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>BUYFIRE — AI Buyer Crash Testing</title>
+<title>BUYFIRE — The Trust Layer for AI Commerce</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 <style>
 :root{--bg:#0a0c10;--card:#151922;--border:#1e2430;--text:#e8ecf4;--muted:#8b95a8;--accent:#00e5a0;--danger:#ff4d6a;--warn:#ffb020;--info:#3b82f6}
@@ -67,8 +67,8 @@ td{padding:10px 8px;border-bottom:1px solid var(--border);vertical-align:top}
 <div class="main" id="app"></div>
 <script>
 const API = location.port === "5173" ? "http://localhost:3847" : (location.origin.includes("3847") ? "" : "http://localhost:3847");
-const SCREENS = ["landing","run","crash","repair","beforeafter","payment","security","audit"];
-let state = { screen: "landing", mission: null, run1: null, run2: null, repair: null, plan: null, payment: null, paymentFail: null, security: null, audit: [], loading: false, error: null, merchant: "ForgeWorks Station" };
+const SCREENS = ["landing","merchant","mreport","run","crash","repair","beforeafter","payment","security","audit"];
+let state = { screen: "landing", mission: null, run1: null, run2: null, repair: null, plan: null, payment: null, paymentFail: null, security: null, audit: [], loading: false, error: null, merchant: "ForgeWorks Station", scan: null, repairBatch: null, gate: null, storeUrl: "", csvText: "", scanIncomplete: null, leadMessage: null };
 
 async function api(path, opts) {
   const r = await fetch(API + path, { headers: { "Content-Type": "application/json" }, ...opts });
@@ -121,19 +121,7 @@ async function doRepair() {
   } catch (e) { state.error = e.message; state.loading = false; render(); }
 }
 
-async function doVerifyMerchant() {
-  state.loading = true; render();
-  try {
-    state.repair = await api("/api/repair/verify-merchant", { method: "POST", body: JSON.stringify({ repair: state.repair }) });
-    state.loading = false; state.audit = await api("/api/audit"); render();
-  } catch (e) { state.error = e.message; state.loading = false; render(); }
-}
-
 async function doRerun() {
-  if (!state.repair || state.repair.merchantVerification !== "DEMO_SYNTHETIC_VERIFIED") {
-    state.error = "Merchant verification required. GENERATED is not a merchant shipping promise.";
-    render(); return;
-  }
   state.loading = true; state.screen = "run"; render();
   try {
     state.run2 = await api("/api/buyer/run", { method: "POST", body: JSON.stringify({ mission: state.mission, isRepairedRun: true, repair: state.repair }) });
@@ -177,18 +165,199 @@ async function showAudit() {
   state.screen = "audit"; render();
 }
 
+
+async function openMerchant() {
+  state.screen = "merchant";
+  state.scan = null;
+  state.repairBatch = null;
+  state.gate = null;
+  state.error = null;
+  render();
+}
+
+async function runMerchantScan(useDemo) {
+  state.loading = true; state.error = null; state.scanIncomplete = null; render();
+  try {
+    const body = {};
+    if (useDemo) body.demo = true;
+    else if (state.csvText && state.csvText.trim()) body.csvText = state.csvText;
+    else if (state.storeUrl && state.storeUrl.trim()) body.url = state.storeUrl.trim();
+    else { state.error = "Enter a public store URL, or run DEMO / SYNTHETIC MERCHANT VERIFICATION."; state.loading = false; render(); return; }
+    const r = await fetch((typeof API!=="undefined"?API:"") + "/api/merchant/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await r.json();
+    if (!r.ok) {
+      if (data.scanIncomplete) {
+        state.scanIncomplete = data;
+        state.scan = null;
+        state.screen = "mreport";
+        state.loading = false;
+        render();
+        return;
+      }
+      throw new Error(data.error || data.incompleteReason || r.statusText);
+    }
+    state.scan = data;
+    state.screen = "mreport";
+    state.loading = false;
+    state.audit = await api("/api/audit");
+    render();
+  } catch (e) { state.error = e.message; state.loading = false; render(); }
+}
+
+async function submitAuditLead() {
+  const email = (document.getElementById("leadEmail") && document.getElementById("leadEmail").value) || "";
+  const storeName = (document.getElementById("leadStoreName") && document.getElementById("leadStoreName").value) || "";
+  state.loading = true; state.error = null; render();
+  try {
+    const res = await api("/api/merchant/audit-request", {
+      method: "POST",
+      body: JSON.stringify({
+        storeUrl: state.storeUrl || (state.scan && state.scan.storeUrl) || "",
+        email,
+        storeName,
+        scannerScore: state.scan && state.scan.readiness ? state.scan.readiness.score : null,
+        classification: state.scan && state.scan.classification ? state.scan.classification : null,
+        scanId: state.scan && state.scan.scanId ? state.scan.scanId : null,
+        source: state.scan && state.scan.sourceLabel ? state.scan.sourceLabel : null
+      })
+    });
+    state.leadMessage = (res.message || "Audit request received.") + (res.requestId ? " Request ID: " + res.requestId : "");
+    state.loading = false; render();
+  } catch (e) { state.error = e.message; state.loading = false; render(); }
+}
+
+async function genMerchantRepair() {
+  if (!state.scan) return;
+  state.loading = true; render();
+  try {
+    state.repairBatch = await api("/api/merchant/repair", { method: "POST", body: JSON.stringify({ scan: state.scan }) });
+    state.gate = await api("/api/merchant/purchase-gate", { method: "POST", body: JSON.stringify({ evidence: state.repairBatch.evidence, productIds: ["prod_laptop_cad_pro"] }) });
+    state.loading = false;
+    state.audit = await api("/api/audit");
+    render();
+  } catch (e) { state.error = e.message; state.loading = false; render(); }
+}
+
+async function verifyOneField() {
+  if (!state.repairBatch) return;
+  const target = (state.repairBatch.repairs || []).find(r => r.field === "shipping_promise");
+  if (!target) { state.error = "No shipping_promise repair to verify"; render(); return; }
+  state.loading = true; render();
+  try {
+    const res = await api("/api/merchant/verify", {
+      method: "POST",
+      body: JSON.stringify({
+        repairBatch: state.repairBatch,
+        field: target.field,
+        productId: target.productId,
+        confirmedValue: "Ships in 2–3 business days via standard courier (merchant-confirmed policy text)."
+      })
+    });
+    if (res.ok) {
+      state.repairBatch = { ...state.repairBatch, evidence: res.evidence };
+      state.gate = await api("/api/merchant/purchase-gate", { method: "POST", body: JSON.stringify({ evidence: res.evidence, productIds: ["prod_laptop_cad_pro"] }) });
+    }
+    state.loading = false;
+    state.audit = await api("/api/audit");
+    render();
+  } catch (e) { state.error = e.message; state.loading = false; render(); }
+}
+
+function printReport() { window.print(); }
+
+function ctaHardening() {
+  alert("Lead-gen CTA only — GET COMMERCE HARDENING ₹2,999.\\nNo payment is processed in this demo.");
+}
+
+
 function render() {
   document.getElementById("nav").innerHTML = SCREENS.map(s => `<button class="${state.screen===s?"active":""}" onclick="nav('${s}')">${s}</button>`).join("");
   const a = document.getElementById("app");
   let h = state.error ? `<div class="alert"><div class="t">Error</div>${state.error}</div>` : "";
 
   if (state.screen === "landing") {
-    h += `<div class="hero"><div class="badge">AI Buyer Crash Testing · Agentic Commerce</div>
+    h += `<div class="hero"><div class="badge">The Trust Layer for AI Commerce</div>
       <h1>Can an AI actually <span>buy</span> from your store?</h1>
-      <p>BUYFIRE sends synthetic buyers through your catalog and checkout, finds where autonomous purchases break, and shows what it takes to make the transaction safe.</p>
-      <button class="btn btn-primary" onclick="startDemo()" ${state.loading?"disabled":""}>${state.loading?"Starting…":"RUN A BUYER"}</button>
-      <button class="btn btn-ghost" onclick="startDemo()" ${state.loading?"disabled":""}>VIEW LIVE DEMO</button></div>`;
+      <p>BUYFIRE scans merchant catalogs for AI-commerce readiness and runs synthetic buyers through discover → checkout — so failures are found before real agents hit them.</p>
+      <button class="btn btn-primary" onclick="openMerchant()" ${state.loading?"disabled":""}>SCAN MY STORE</button>
+      <button class="btn btn-ghost" onclick="startDemo()" ${state.loading?"disabled":""}>SIMULATE AI BUYER</button></div>`;
   }
+
+  if (state.screen === "merchant") {
+    h += `<div class="section-title">Scan Your Store</div>
+      <div class="section-sub">Enter a public store URL. BUYFIRE fetches public pages only and reports honest evidence — never invented shipping or returns facts.</div>
+      <div class="card">
+        <div class="card-title">Store URL</div>
+        <input id="storeUrl" type="url" placeholder="https://yourstore.com" value="${state.storeUrl||""}"
+          style="width:100%;padding:12px;border-radius:8px;border:1px solid var(--border);background:#11141b;color:var(--text);margin-bottom:14px;font-size:15px"/>
+        <button class="btn btn-primary" onclick="state.storeUrl=document.getElementById('storeUrl').value;runMerchantScan(false)" ${state.loading?"disabled":""}>${state.loading?"Scanning…":"SCAN MY STORE"}</button>
+        <button class="btn btn-ghost" onclick="runMerchantScan(true)" ${state.loading?"disabled":""}>DEMO / SYNTHETIC MERCHANT VERIFICATION</button>
+        <p class="muted" style="margin-top:12px;font-size:12px">Demo mode uses the labeled synthetic catalog and is never presented as your real store.</p>
+      </div>`;
+  }
+
+  if (state.screen === "mreport" && state.scanIncomplete && !state.scan) {
+    const inc = state.scanIncomplete;
+    h += `<div class="section-title">SCAN INCOMPLETE</div>
+      <div class="alert"><div class="t">Could not complete public scan</div>${inc.incompleteReason || inc.error || "Unknown reason"}</div>
+      <p class="muted">BUYFIRE does not fabricate results when a site blocks bots, requires JavaScript-only rendering, auth, or is unreachable.</p>
+      <button class="btn btn-ghost" onclick="openMerchant()">Try another URL</button>
+      <p class="muted" style="margin:12px 0">Recovery: upload product CSV via API <code>csvText</code>, or use DEMO mode for synthetic verification.</p>
+      <button class="btn btn-ghost" onclick="runMerchantScan(true)">DEMO / SYNTHETIC MERCHANT VERIFICATION</button>`;
+  }
+
+  if (state.screen === "mreport" && state.scan) {
+    const s = state.scan;
+    const cats = Object.entries(s.readiness.categories).map(([k,v]) =>
+      `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)"><span>${k}</span><strong>${v}/100</strong></div>`
+    ).join("");
+    const findings = (s.findings||[]).map(f =>
+      `<div class="ev ${f.severity==="HIGH"?"blocked":"warning"}"><span>${f.severity==="HIGH"?"✕":"⚠"}</span><div><strong>[${f.category}] ${f.title}</strong><div class="muted">${f.detail}</div><div class="mono muted">${f.status}</div></div></div>`
+    ).join("");
+    h += `<div class="section-title">BUYFIRE AI Commerce Readiness</div>
+      <div class="section-sub">${s.sourceLabel}${s.storeUrl?" · "+s.storeUrl:""} · ${s.merchant.name}</div>
+      ${s.isDemo?`<div class="sim">DEMO / SYNTHETIC MERCHANT VERIFICATION — not your real store</div>`:(s.sourceLabel===`PUBLIC URL SCAN`?`<div class="sim" style="color:var(--accent);border-color:rgba(0,229,160,.35);background:rgba(0,229,160,.08)">PUBLIC URL SCAN — observed evidence only</div>`:"")}
+      <div class="grid2">
+        <div class="card" style="text-align:center">
+          <div class="card-title">Overall score</div>
+          <div style="font-size:48px;font-weight:700;color:var(--accent)">${s.readiness.score}<span style="font-size:18px;color:var(--muted)"> / 100</span></div>
+          <div class="muted">${s.classification || s.readiness.label}</div>
+          <div class="mono muted" style="margin-top:6px">products: ${s.summary.productCount!=null?s.summary.productCount:(s.merchant&&s.merchant.productCount)||0}</div>
+          <p style="margin-top:12px">${s.summary.critical!=null?s.summary.critical:s.summary.high} critical · ${s.summary.warnings!=null?s.summary.warnings:s.summary.medium} warnings · ${s.summary.passing!=null?s.summary.passing:0} passing · ${s.summary.unknownFields} UNKNOWN</p>
+        </div>
+        <div class="card"><div class="card-title">Category scores</div>${cats}</div>
+      </div>
+      <div class="card"><div class="card-title">Findings</div>${findings}</div>
+      ${s.classification==="SCAN WEAK"||s.classification==="INCOMPLETE"||(s.recovery)?`<div class="alert"><div class="t">${s.classification||"LIMITED SCAN"}</div>${(s.recovery&&s.recovery.message)||"Catalog/price evidence could not be fully verified. Upload product CSV or product URLs for a stronger scan."}</div>`:""}`;
+    if (state.repairBatch) {
+      const reps = state.repairBatch.repairs.map(r =>
+        `<tr><td class="mono">${r.field}</td><td>${r.productName||"—"}</td><td class="muted">${(r.generated||"").slice(0,80)}…</td><td><span class="badge-g">${r.status}</span></td></tr>`
+      ).join("");
+      h += `<div class="card"><div class="card-title">Repairs (GENERATED — NOT VERIFIED)</div>
+        <p class="muted" style="margin-bottom:10px">${state.repairBatch.warning}</p>
+        <table><thead><tr><th>Field</th><th>Product</th><th>Generated structure</th><th>Status</th></tr></thead><tbody>${reps}</tbody></table></div>`;
+      if (state.gate) {
+        h += state.gate.blocked
+          ? `<div class="alert"><div class="t">Purchase authorization blocked</div>${state.gate.reason}</div>`
+          : `<div class="sim" style="color:var(--accent);border-color:rgba(0,229,160,.35);background:rgba(0,229,160,.08)">No GENERATED blockers for gated products</div>`;
+      }
+    }
+    h += `<button class="btn btn-primary" onclick="genMerchantRepair()" ${state.loading?"disabled":""}>Generate Repair Structures</button>
+      <button class="btn btn-ghost" onclick="verifyOneField()" ${!state.repairBatch||state.loading?"disabled":""}>Merchant Verify Shipping (demo)</button>
+      <button class="btn btn-ghost" onclick="printReport()">Generate Readiness Report</button>
+      <div class="card" style="margin-top:20px;text-align:center">
+        <p style="margin-bottom:8px;font-weight:600">Get the full BUYFIRE audit</p>
+        <p class="muted" style="margin-bottom:12px;font-size:13px">₹2,999 — lead request only, no payment processed in this build.</p>
+        <input id="leadStoreName" type="text" placeholder="Store / company name (optional)" style="width:min(320px,100%);padding:10px;border-radius:8px;border:1px solid var(--border);background:#11141b;color:var(--text);margin-bottom:8px"/><br/>
+        <input id="leadEmail" type="email" placeholder="merchant@email.com" style="width:min(320px,100%);padding:10px;border-radius:8px;border:1px solid var(--border);background:#11141b;color:var(--text);margin-bottom:10px"/>
+        <br/>
+        <button class="btn btn-primary" onclick="submitAuditLead()" ${state.loading?"disabled":""}>GET THE FULL BUYFIRE AUDIT — ₹2,999</button>
+        ${state.leadMessage?`<p style="margin-top:12px;color:var(--accent)">${state.leadMessage}</p>`:""}
+        <p class="muted" style="margin-top:8px;font-size:12px">We capture store URL + email only. No charge.</p>
+      </div>
+      <button class="btn btn-ghost" onclick="startDemo()">Simulate AI Buyer on this catalog</button>`;
+  }
+
 
   if (state.screen === "run") {
     h += `<div class="section-title">AI Buyer Crash Test ${state.loading?"…":""}</div>
@@ -203,26 +372,18 @@ function render() {
       <div class="section-sub">Merchant: ${state.merchant}</div>
       ${state.mission?`<div class="mission">"${state.mission.statement}"</div>`:""}
       <div class="state-rail">${chips(state.run1)}</div>
-      ${state.run1.finalState==="BLOCKED"?`<div class="alert"><div class="t">PURCHASE BLOCKED</div>Reason: ${state.run1.blockedReason}</div>`:""}
+      ${state.run1.finalState==="BLOCKED"?`<div class="alert"><div class="t">PURCHASE BLOCKED</div>${state.run1.blockedReason}</div>`:""}
       <div class="card"><div class="card-title">Decision Evidence</div>${evidence(state.run1.states.flatMap(s=>s.evidence))}</div>
-      <button class="btn btn-primary" onclick="doRepair()" ${state.loading?"disabled":""}>GENERATE REPAIR</button>`;
+      <button class="btn btn-primary" onclick="doRepair()" ${state.loading?"disabled":""}>Generate Repair</button>`;
   }
 
   if (state.screen === "repair" && state.repair) {
-    const verified = state.repair.merchantVerification === "DEMO_SYNTHETIC_VERIFIED";
     h += `<div class="section-title">Commerce Repair</div>
-      <div class="section-sub">BUYFIRE does not hallucinate missing commerce facts. GENERATED is a schema. Verification is required.</div>
-      <div class="sim">DEMO / SYNTHETIC MERCHANT VERIFICATION is labeled. It is not real merchant data.</div>
-      <div class="card" style="font-family:IBM Plex Mono,monospace;font-size:11px;font-weight:700;letter-spacing:.03em">
-        PURCHASE BLOCKED → GENERATE REPAIR → GENERATED STRUCTURE NOT VERIFIED → SIMULATE MERCHANT VERIFICATION → VERIFIED → RERUN SAME MISSION → COMPLETE
-      </div>
+      <div class="section-sub">Machine-readable offer for ${state.repair.productName}. Unknown stays UNKNOWN.</div>
       <div class="card"><table><thead><tr><th>Field</th><th>Existing</th><th>Generated</th><th>Status</th></tr></thead><tbody>
-      ${state.repair.items.map(i=>`<tr><td class="mono">${i.field}</td><td class="muted">${i.existing==null?"UNKNOWN":i.existing}</td><td>${i.generated==null?"UNKNOWN":i.generated}</td><td><span class="badge-${i.status==="VERIFIED"?"g":i.status[0].toLowerCase()}">${i.status}</span></td></tr>`).join("")}
+      ${state.repair.items.map(i=>`<tr><td class="mono">${i.field}</td><td class="muted">${i.existing==null?"—":i.existing}</td><td>${i.generated==null?"UNKNOWN":i.generated}</td><td><span class="badge-${i.status[0].toLowerCase()}">${i.status}</span></td></tr>`).join("")}
       </tbody></table></div>
-      <p class="muted" style="font-size:12px">${(state.repair.items.find(i=>i.field==="shipping_promise")||{}).note||""}</p>
-      <p class="muted">Merchant verification: <strong>${state.repair.merchantVerification||"REQUIRED"}</strong></p>
-      ${!verified?`<button class="btn btn-primary" onclick="doVerifyMerchant()" ${state.loading?"disabled":""}>SIMULATE MERCHANT VERIFICATION</button>`:""}
-      <button class="btn btn-primary" onclick="doRerun()" ${state.loading||!verified?"disabled":""}>RERUN SAME MISSION</button>`;
+      <button class="btn btn-primary" onclick="doRerun()" ${state.loading?"disabled":""}>Rerun Same Mission</button>`;
   }
 
   if (state.screen === "beforeafter") {
