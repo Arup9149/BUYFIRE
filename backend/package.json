@@ -4,9 +4,9 @@
   "private": true,
   "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "node --watch server.mjs",
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "node server.mjs", "start:legacy-express": "node dist/index.js",
     "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {

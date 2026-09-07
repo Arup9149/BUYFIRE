@@ -312,7 +312,7 @@ function render() {
       `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)"><span>${k}</span><strong>${v}/100</strong></div>`
     ).join("");
     const findings = (s.findings||[]).map(f =>
-      `<div class="ev ${f.severity==="HIGH"?"blocked":"warning"}"><span>${f.severity==="HIGH"?"✕":"⚠"}</span><div><strong>[${f.category}] ${f.title}</strong><div class="muted">${f.detail}</div><div class="mono muted">${f.status}</div></div></div>`
+      `<div class="ev ${f.severity==="HIGH"?"blocked":"warning"}"><span>${f.severity==="HIGH"?"✕":"⚠"}</span><div><strong>[${f.category}] ${f.severity || "INFO"}</strong><div class="muted">${f.evidence || f.detail || f.title || f.message || ""}</div><div class="mono muted">${f.status || ""}</div>${f.recommendation ? `<div class="muted">Recommendation: ${f.recommendation}</div>` : ""}</div></div>`
     ).join("");
     h += `<div class="section-title">BUYFIRE AI Commerce Readiness</div>
       <div class="section-sub">${s.sourceLabel}${s.storeUrl?" · "+s.storeUrl:""} · ${s.merchant.name}</div>
